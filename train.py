@@ -5,8 +5,12 @@ Usage: uv run train.py
 """
 
 import os
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+import resource
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+# CPU optimization: use all available cores
+num_cores = os.cpu_count() or 1
+os.environ.setdefault("OMP_NUM_THREADS", str(num_cores))
+os.environ.setdefault("MKL_NUM_THREADS", str(num_cores))
 
 import gc
 import math
@@ -16,14 +20,9 @@ from dataclasses import dataclass, asdict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+torch.set_num_threads(num_cores)
 
-from kernels import get_kernel
-cap = torch.cuda.get_device_capability()
-# varunneal's FA3 is Hopper only, use kernels-community on non-Hopper GPUs
-repo = "varunneal/flash-attention-3" if cap == (9, 0) else "kernels-community/flash-attn3"
-fa3 = get_kernel(repo).flash_attn_interface
-
-from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
+from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb, get_device
 
 # ---------------------------------------------------------------------------
 # GPT Model
@@ -90,8 +89,12 @@ class CausalSelfAttention(nn.Module):
         q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)
 
-        y = fa3.flash_attn_func(q, k, v, causal=True, window_size=window_size)
-        y = y.contiguous().view(B, T, -1)
+        # SDPA expects (B, H, T, D) layout
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        y = y.transpose(1, 2).contiguous().view(B, T, -1)
         y = self.c_proj(y)
         return y
 
@@ -175,10 +178,11 @@ class GPT(nn.Module):
         head_dim = self.config.n_embd // self.config.n_head
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
         self.cos, self.sin = cos, sin
-        # Cast embeddings to bf16
-        self.transformer.wte.to(dtype=torch.bfloat16)
-        for ve in self.value_embeds.values():
-            ve.to(dtype=torch.bfloat16)
+        # Cast embeddings to bf16 (only on CUDA where autocast is used)
+        if torch.cuda.is_available():
+            self.transformer.wte.to(dtype=torch.bfloat16)
+            for ve in self.value_embeds.values():
+                ve.to(dtype=torch.bfloat16)
 
     def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
         if device is None:
@@ -188,7 +192,8 @@ class GPT(nn.Module):
         t = torch.arange(seq_len, dtype=torch.float32, device=device)
         freqs = torch.outer(t, inv_freq)
         cos, sin = freqs.cos(), freqs.sin()
-        cos, sin = cos.bfloat16(), sin.bfloat16()
+        if torch.cuda.is_available():
+            cos, sin = cos.bfloat16(), sin.bfloat16()
         cos, sin = cos[None, :, None, :], sin[None, :, None, :]
         return cos, sin
 
@@ -302,7 +307,6 @@ polar_express_coeffs = [
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
 ]
 
-@torch.compile(dynamic=False, fullgraph=True)
 def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_t, eps_t, wd_t):
     p.mul_(1 - lr_t * wd_t)
     exp_avg.lerp_(grad, 1 - beta1_t)
@@ -313,7 +317,6 @@ def adamw_step_fused(p, grad, exp_avg, exp_avg_sq, step_t, lr_t, beta1_t, beta2_
     step_size = lr_t / bias1
     p.add_(exp_avg / denom, alpha=-step_size)
 
-@torch.compile(dynamic=False, fullgraph=True)
 def muon_step_fused(stacked_grads, stacked_params, momentum_buffer, second_momentum_buffer,
                     momentum_t, lr_t, wd_t, beta2_t, ns_steps, red_dim):
     # Nesterov momentum
@@ -435,7 +438,7 @@ HEAD_DIM = 128          # target head dimension for attention
 WINDOW_PATTERN = "SSSL" # sliding window pattern: L=full, S=half context
 
 # Optimization
-TOTAL_BATCH_SIZE = 2**19 # ~524K tokens per optimizer step
+TOTAL_BATCH_SIZE = 2**16 # ~65K tokens per optimizer step (reduced for CPU)
 EMBEDDING_LR = 0.6      # learning rate for token embeddings (Adam)
 UNEMBEDDING_LR = 0.004  # learning rate for lm_head (Adam)
 MATRIX_LR = 0.04        # learning rate for matrix parameters (Muon)
@@ -447,8 +450,8 @@ WARMDOWN_RATIO = 0.5    # fraction of time budget for LR warmdown
 FINAL_LR_FRAC = 0.0     # final LR as fraction of initial
 
 # Model size
-DEPTH = 8               # number of transformer layers
-DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
+DEPTH = 4               # number of transformer layers (reduced for CPU)
+DEVICE_BATCH_SIZE = 8   # per-device batch size (reduced for CPU)
 
 # ---------------------------------------------------------------------------
 # Setup: tokenizer, model, optimizer, dataloader
@@ -456,10 +459,17 @@ DEVICE_BATCH_SIZE = 128  # per-device batch size (reduce if OOM)
 
 t_start = time.time()
 torch.manual_seed(42)
-torch.cuda.manual_seed(42)
+device = get_device()
+if device.type == "cuda":
+    torch.cuda.manual_seed(42)
+    os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 torch.set_float32_matmul_precision("high")
-device = torch.device("cuda")
-autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+if device.type == "cuda":
+    autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+else:
+    # bf16 autocast on CPU causes 400x backward slowdown — use fp32 with nullcontext
+    from contextlib import nullcontext
+    autocast_ctx = nullcontext()
 H100_BF16_PEAK_FLOPS = 989.5e12
 
 tokenizer = Tokenizer.from_directory()
@@ -505,7 +515,13 @@ optimizer = model.setup_optimizer(
     weight_decay=WEIGHT_DECAY,
 )
 
-model = torch.compile(model, dynamic=False)
+if device.type == "cuda":
+    adamw_step_fused = torch.compile(adamw_step_fused, dynamic=False, fullgraph=True)
+    muon_step_fused = torch.compile(muon_step_fused, dynamic=False, fullgraph=True)
+    model = torch.compile(model, dynamic=False)
+else:
+    print("CPU mode: skipping torch.compile")
+
 
 train_loader = make_dataloader(tokenizer, DEVICE_BATCH_SIZE, MAX_SEQ_LEN, "train")
 x, y, epoch = next(train_loader)  # prefetch first batch
@@ -541,7 +557,8 @@ total_training_time = 0
 step = 0
 
 while True:
-    torch.cuda.synchronize()
+    if device.type == "cuda":
+        torch.cuda.synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         with autocast_ctx:
@@ -571,7 +588,8 @@ while True:
         print("FAIL")
         exit(1)
 
-    torch.cuda.synchronize()
+    if device.type == "cuda":
+        torch.cuda.synchronize()
     t1 = time.time()
     dt = t1 - t0
 
@@ -584,7 +602,10 @@ while True:
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1))
     pct_done = 100 * progress
     tok_per_sec = int(TOTAL_BATCH_SIZE / dt)
-    mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+    if device.type == "cuda":
+        mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE / dt / H100_BF16_PEAK_FLOPS
+    else:
+        mfu = 0.0
     remaining = max(0, TIME_BUDGET - total_training_time)
 
     print(f"\rstep {step:05d} ({pct_done:.1f}%) | loss: {debiased_smooth_loss:.6f} | lrm: {lrm:.2f} | dt: {dt*1000:.0f}ms | tok/sec: {tok_per_sec:,} | mfu: {mfu:.1f}% | epoch: {epoch} | remaining: {remaining:.0f}s    ", end="", flush=True)
@@ -615,8 +636,12 @@ with autocast_ctx:
 # Final summary
 t_end = time.time()
 startup_time = t_start_training - t_start
-steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / H100_BF16_PEAK_FLOPS if total_training_time > 0 else 0
-peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+if device.type == "cuda":
+    steady_state_mfu = 100 * num_flops_per_token * TOTAL_BATCH_SIZE * (step - 10) / total_training_time / H100_BF16_PEAK_FLOPS if total_training_time > 0 else 0
+    peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+else:
+    steady_state_mfu = 0.0
+    peak_vram_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # KB -> MB
 
 print("---")
 print(f"val_bpb:          {val_bpb:.6f}")

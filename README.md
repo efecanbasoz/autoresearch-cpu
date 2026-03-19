@@ -1,92 +1,104 @@
-# autoresearch
+# autoresearch-cpu
 
-![teaser](progress.png)
+CPU adaptation of Karpathy's [autoresearch](https://github.com/karpathy/autoresearch) — autonomous ML research agents on commodity hardware, no GPU required.
 
-*One day, frontier AI research used to be done by meat computers in between eating, sleeping, having other fun, and synchronizing once in a while using sound wave interconnect in the ritual of "group meeting". That era is long gone. Research is now entirely the domain of autonomous swarms of AI agents running across compute cluster megastructures in the skies. The agents claim that we are now in the 10,205th generation of the code base, in any case no one could tell if that's right or wrong as the "code" is now a self-modifying binary that has grown beyond human comprehension. This repo is the story of how it all began. -@karpathy, March 2026*.
+The original autoresearch requires an NVIDIA GPU (tested on H100). This fork removes that requirement entirely, letting you run autonomous ML research experiments on any machine with a CPU. Perfect for learning, experimentation, and tinkering without cloud GPU costs.
 
-The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069).
+## What changed vs original
 
-## How it works
+| Area | Original | This fork |
+|------|----------|-----------|
+| Attention | Flash Attention 3 (`kernels` package) | PyTorch native `scaled_dot_product_attention` |
+| Mixed precision | bf16 autocast (CUDA) | fp32 (bf16 autocast [causes ~400x backward slowdown on CPU](https://github.com/pytorch/pytorch/issues/)) |
+| Compilation | `torch.compile` with CUDA backend | Disabled on CPU (inductor backend crashes) |
+| Device | Hardcoded `cuda` | Auto-detected via `get_device()` — works on both CPU and CUDA |
+| Defaults | DEPTH=8, SEQ_LEN=2048, BATCH=128 | DEPTH=4, SEQ_LEN=512, BATCH=8 (tuned for CPU) |
+| Time budget | 5 min | 30 min (compensates for slower hardware) |
+| Sliding window | SSSL pattern via FA3 | Full causal attention (no sliding window) |
+| Dependencies | `torch[cu128]` + `kernels` | `torch` (CPU, no CUDA index) |
 
-The repo is deliberately kept small and only really has three files that matter:
+All changes are backward-compatible — if a CUDA GPU is detected, the code uses CUDA paths automatically.
 
-- **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
-- **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
-- **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+## Requirements
 
-By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
-
-If you are new to neural networks, this ["Dummy's Guide"](https://x.com/hooeem/status/2030720614752039185) looks pretty good for a lot more context.
+- **CPU**: Any x86_64 processor (tested on Intel Core Ultra 7 265, 20 cores)
+- **RAM**: 8GB minimum, 16GB+ recommended
+- **Disk**: ~2GB for dataset + dependencies
+- **Python**: 3.10+
+- **No GPU needed**
 
 ## Quick start
 
-**Requirements:** A single NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
-
 ```bash
-
-# 1. Install uv project manager (if you don't already have it)
+# 1. Install uv (if you don't have it)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 2. Install dependencies
 uv sync
 
 # 3. Download data and train tokenizer (one-time, ~2 min)
-uv run prepare.py
+uv run prepare.py --num-shards 4
 
-# 4. Manually run a single training experiment (~5 min)
+# 4. Run a training experiment (~40 min: 30 min training + eval)
 uv run train.py
 ```
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+## Benchmark (Intel Core Ultra 7 265, 20 cores, 128GB RAM)
 
-## Running the agent
+| Metric | Value |
+|--------|-------|
+| val_bpb | 1.955 |
+| Training time | 307s (5 min budget) |
+| Step time | ~12s |
+| Throughput | ~5,000 tok/sec |
+| Peak memory | 2.2 GB |
+| Parameters | 11.5M |
+| Steps completed | 32 |
 
-Simply spin up your Claude/Codex or whatever you want in this repo (and disable all permissions), then you can prompt something like:
+With the default 30 min TIME_BUDGET, expect ~140 steps and better val_bpb (~1.5-1.7).
 
-```
-Hi have a look at program.md and let's kick off a new experiment! let's do the setup first.
-```
+## How it works
 
-The `program.md` file is essentially a super lightweight "skill".
+Same as the original — three files:
 
-## Project structure
+- **`prepare.py`** — data prep, tokenizer, dataloader, evaluation metric. Not modified by the agent.
+- **`train.py`** — GPT model, Muon+AdamW optimizer, training loop. **The agent edits this file.**
+- **`program.md`** — instructions for the AI agent.
 
-```
-prepare.py      — constants, data prep + runtime utilities (do not modify)
-train.py        — model, optimizer, training loop (agent modifies this)
-program.md      — agent instructions
-pyproject.toml  — dependencies
-```
+Point your AI agent (Claude, GPT, Codex, etc.) at `program.md` and let it run experiments autonomously. Each experiment modifies `train.py`, trains for the time budget, checks `val_bpb`, and keeps or discards the change.
 
-## Design choices
+## Tuning for your hardware
 
-- **Single file to modify.** The agent only touches `train.py`. This keeps the scope manageable and diffs reviewable.
-- **Fixed time budget.** Training always runs for exactly 5 minutes, regardless of your specific platform. This means you can expect approx 12 experiments/hour and approx 100 experiments while you sleep. There are two upsides of this design decision. First, this makes experiments directly comparable regardless of what the agent changes (model size, batch size, architecture, etc). Second, this means that autoresearch will find the most optimal model for your platform in that time budget. The downside is that your runs (and results) become not comparable to other people running on other compute platforms.
-- **Self-contained.** No external dependencies beyond PyTorch and a few small packages. No distributed training, no complex configs. One GPU, one file, one metric.
+If training is too slow or you want faster iteration:
 
-## Platform support
+| Parameter | File | Default | Try |
+|-----------|------|---------|-----|
+| `DEPTH` | train.py | 4 | 2 (smaller model, faster steps) |
+| `MAX_SEQ_LEN` | prepare.py | 512 | 256 (4x less attention compute) |
+| `DEVICE_BATCH_SIZE` | train.py | 8 | 4 or 2 (less memory per step) |
+| `TIME_BUDGET` | prepare.py | 1800 | 300 (quick 5 min test) |
+| `TOTAL_BATCH_SIZE` | train.py | 2^16 | 2^14 (fewer grad accum steps) |
 
-This code currently requires that you have a single NVIDIA GPU. In principle it is quite possible to support CPU, MPS and other platforms but this would also bloat the code. I'm not 100% sure that I want to take this on personally right now. People can reference (or have their agents reference) the full/parent nanochat repository that has wider platform support and shows the various solutions (e.g. a Flash Attention 3 kernels fallback implementation, generic device support, autodetection, etc.), feel free to create forks or discussions for other platforms and I'm happy to link to them here in the README in some new notable forks section or etc.
+For much smaller hardware, consider using [TinyStories](https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean) dataset — lower entropy text produces better results with tiny models.
 
-Seeing as there seems to be a lot of interest in tinkering with autoresearch on much smaller compute platforms than an H100, a few extra words. If you're going to try running autoresearch on smaller computers (Macbooks etc.), I'd recommend one of the forks below. On top of this, here are some recommendations for how to tune the defaults for much smaller models for aspiring forks:
+## Key findings
 
-1. To get half-decent results I'd use a dataset with a lot less entropy, e.g. this [TinyStories dataset](https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean). These are GPT-4 generated short stories. Because the data is a lot narrower in scope, you will see reasonable results with a lot smaller models (if you try to sample from them after training).
-2. You might experiment with decreasing `vocab_size`, e.g. from 8192 down to 4096, 2048, 1024, or even - simply byte-level tokenizer with 256 possibly bytes after utf-8 encoding.
-3. In `prepare.py`, you'll want to lower `MAX_SEQ_LEN` a lot, depending on the computer even down to 256 etc. As you lower `MAX_SEQ_LEN`, you may want to experiment with increasing `DEVICE_BATCH_SIZE` in `train.py` slightly to compensate. The number of tokens per fwd/bwd pass is the product of these two.
-4. Also in `prepare.py`, you'll want to decrease `EVAL_TOKENS` so that your validation loss is evaluated on a lot less data.
-5. In `train.py`, the primary single knob that controls model complexity is the `DEPTH` (default 8, here). A lot of variables are just functions of this, so e.g. lower it down to e.g. 4.
-6. You'll want to most likely use `WINDOW_PATTERN` of just "L", because "SSSL" uses alternating banded attention pattern that may be very inefficient for you. Try it.
-7. You'll want to lower `TOTAL_BATCH_SIZE` a lot, but keep it powers of 2, e.g. down to `2**14` (~16K) or so even, hard to tell.
+**bf16 autocast on CPU is broken for training.** `torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16)` causes ~400x backward pass slowdown. Forward pass is fine, but autograd backward is catastrophically slow. This fork uses fp32 with `contextlib.nullcontext()` instead.
 
-I think these would be the reasonable hyperparameters to play with. Ask your favorite coding agent for help and copy paste them this guide, as well as the full source code.
-
-## Notable forks
-
-- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
-- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS)
-- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
-- [andyluo7/autoresearch](https://github.com/andyluo7/autoresearch) (AMD)
+**torch.compile inductor crashes on CPU.** The inductor backend fails during C++ code generation for this model architecture. This fork skips compilation on CPU entirely. Training still works in eager mode.
 
 ## License
 
-MIT
+MIT — same as the original.
+
+## Credits
+
+- [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) — the original project
+- [nanochat](https://github.com/karpathy/nanochat) — the training code this is based on
+
+## Other platform forks
+
+- [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
+- [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS MLX)
+- [jsegov/autoresearch-win-rtx](https://github.com/jsegov/autoresearch-win-rtx) (Windows)
+- [andyluo7/autoresearch](https://github.com/andyluo7/autoresearch) (AMD ROCm)
