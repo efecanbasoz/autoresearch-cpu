@@ -91,6 +91,12 @@ For much smaller hardware, consider using [TinyStories](https://huggingface.co/d
 
 MIT — same as the original.
 
+## Contributors
+
+<!-- ALL-CONTRIBUTORS-LIST:START -->
+<a href="https://github.com/sirkhet-dev"><img src="https://github.com/sirkhet-dev.png" width="60px" alt="sirkhet-dev" /></a>
+<!-- ALL-CONTRIBUTORS-LIST:END -->
+
 ## Credits
 
 - [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) — the original project
