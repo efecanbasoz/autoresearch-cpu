@@ -13,6 +13,7 @@ import os
 import sys
 import time
 import math
+import hashlib
 import argparse
 import pickle
 from multiprocessing import Pool
@@ -151,6 +152,13 @@ def train_tokenizer():
     token_bytes_path = os.path.join(TOKENIZER_DIR, "token_bytes.pt")
 
     if os.path.exists(tokenizer_pkl) and os.path.exists(token_bytes_path):
+        hash_path = tokenizer_pkl + ".sha256"
+        if not os.path.exists(hash_path):
+            with open(tokenizer_pkl, "rb") as f:
+                digest = hashlib.sha256(f.read()).hexdigest()
+            with open(hash_path, "w") as f:
+                f.write(digest)
+            print(f"Tokenizer: generated missing integrity hash at {hash_path}")
         print(f"Tokenizer: already trained at {TOKENIZER_DIR}")
         return
 
@@ -181,9 +189,13 @@ def train_tokenizer():
         special_tokens=special_tokens,
     )
 
-    # Save tokenizer
+    # Save tokenizer and its integrity hash
     with open(tokenizer_pkl, "wb") as f:
         pickle.dump(enc, f)
+    with open(tokenizer_pkl, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()
+    with open(tokenizer_pkl + ".sha256", "w") as f:
+        f.write(digest)
 
     t1 = time.time()
     print(f"Tokenizer: trained in {t1 - t0:.1f}s, saved to {tokenizer_pkl}")
@@ -222,8 +234,31 @@ class Tokenizer:
 
     @classmethod
     def from_directory(cls, tokenizer_dir=TOKENIZER_DIR):
-        with open(os.path.join(tokenizer_dir, "tokenizer.pkl"), "rb") as f:
-            enc = pickle.load(f)
+        pkl_path = os.path.join(tokenizer_dir, "tokenizer.pkl")
+        hash_path = pkl_path + ".sha256"
+        with open(pkl_path, "rb") as f:
+            data = f.read()
+        if os.path.exists(hash_path):
+            with open(hash_path) as f:
+                expected = f.read().strip()
+            actual = hashlib.sha256(data).hexdigest()
+            if actual != expected:
+                raise RuntimeError(
+                    f"Tokenizer integrity check failed: {pkl_path}\n"
+                    f"  expected sha256: {expected}\n"
+                    f"  actual sha256:   {actual}\n"
+                    "The cache may have been tampered with. "
+                    "Delete the cache and re-run prepare.py."
+                )
+        else:
+            import warnings
+            warnings.warn(
+                f"No integrity hash found at {hash_path}. "
+                "Tokenizer loaded without verification. "
+                "Re-run prepare.py to generate the hash file.",
+                stacklevel=2,
+            )
+        enc = pickle.loads(data)
         return cls(enc)
 
     def get_vocab_size(self):

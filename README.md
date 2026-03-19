@@ -15,7 +15,7 @@ The original autoresearch requires an NVIDIA GPU (tested on H100). This fork rem
 | Defaults | DEPTH=8, SEQ_LEN=2048, BATCH=128 | DEPTH=4, SEQ_LEN=512, BATCH=8 (tuned for CPU) |
 | Time budget | 5 min | 30 min (compensates for slower hardware) |
 | Sliding window | SSSL pattern via FA3 | Full causal attention (no sliding window) |
-| Dependencies | `torch[cu128]` + `kernels` | `torch` (CPU, no CUDA index) |
+| Dependencies | `torch[cu128]` + `kernels` | `torch+cpu` (explicit CPU-only index, zero NVIDIA packages) |
 
 All changes are backward-compatible — if a CUDA GPU is detected, the code uses CUDA paths automatically.
 
@@ -86,6 +86,12 @@ For much smaller hardware, consider using [TinyStories](https://huggingface.co/d
 **bf16 autocast on CPU is broken for training.** `torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16)` causes ~400x backward pass slowdown. Forward pass is fine, but autograd backward is catastrophically slow. This fork uses fp32 with `contextlib.nullcontext()` instead.
 
 **torch.compile inductor crashes on CPU.** The inductor backend fails during C++ code generation for this model architecture. This fork skips compilation on CPU entirely. Training still works in eager mode.
+
+## Security notes
+
+- **Tokenizer cache integrity**: The tokenizer is stored as a Python pickle at `~/.cache/autoresearch/tokenizer/tokenizer.pkl`. A SHA-256 hash is written alongside it at creation time and verified on every load. Do not import tokenizer caches from untrusted sources.
+- **Data provenance**: Dataset shards are downloaded from HuggingFace over HTTPS. No content-integrity checksums are verified beyond TLS. If you require stricter provenance guarantees, verify shard hashes manually before training.
+- **Autonomous execution**: The `program.md` workflow instructs AI agents to run indefinitely with local git operations. Always run on a dedicated branch in an isolated environment.
 
 ## License
 

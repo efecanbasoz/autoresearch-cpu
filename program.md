@@ -112,3 +112,9 @@ The idea is that you are a completely autonomous researcher trying things out. I
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — read papers referenced in the code, re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
 
 As an example use case, a user might leave you running while they sleep. If each experiment takes you ~5 minutes then you can run approx 12/hour, for a total of about 100 over the duration of the average human sleep. The user then wakes up to experimental results, all completed by you while they slept!
+
+## Safety notes
+
+- **Run on a dedicated branch.** The experiment loop performs `git reset` when discarding failed experiments. Never run this on a branch with uncommitted work you care about.
+- **Use an isolated environment.** Prefer running in a dedicated directory or container to avoid accidental impact on other projects or system state.
+- **Monitor resource usage.** The autonomous loop runs indefinitely and consumes CPU/memory continuously. On shared machines, be mindful of other users and workloads.
