@@ -1,10 +1,41 @@
 # autoresearch-cpu
 
-CPU adaptation of Karpathy's [autoresearch](https://github.com/karpathy/autoresearch) — autonomous ML research agents on commodity hardware, no GPU required.
+> CPU adaptation of Karpathy's autoresearch — autonomous ML research on commodity hardware, no GPU required.
 
-The original autoresearch requires an NVIDIA GPU (tested on H100). This fork removes that requirement entirely, letting you run autonomous ML research experiments on any machine with a CPU. Perfect for learning, experimentation, and tinkering without cloud GPU costs.
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](./LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![PyTorch](https://img.shields.io/badge/PyTorch-CPU-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)](https://pytorch.org)
 
-## What changed vs original
+The original [autoresearch](https://github.com/karpathy/autoresearch) requires an NVIDIA GPU (tested on H100). This fork removes that requirement entirely, letting you run autonomous ML research experiments on any machine with a CPU. Perfect for learning, experimentation, and tinkering without cloud GPU costs.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [What Changed vs Original](#what-changed-vs-original)
+- [Requirements](#requirements)
+- [Quick Start](#quick-start)
+- [Benchmark](#benchmark)
+- [How It Works](#how-it-works)
+- [Tuning for Your Hardware](#tuning-for-your-hardware)
+- [Key Findings](#key-findings)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Features
+
+- **Zero GPU requirement** — Runs on any x86_64 CPU
+- **Auto-detection** — Uses CUDA if available, falls back to CPU seamlessly
+- **CPU-tuned defaults** — Optimized batch size, sequence length, and time budget for CPU
+- **Backward compatible** — All changes work on both CPU and CUDA
+- **Minimal dependencies** — `torch+cpu` only, zero NVIDIA packages needed
+
+---
+
+## What Changed vs Original
 
 | Area | Original | This fork |
 |------|----------|-----------|
@@ -19,6 +50,8 @@ The original autoresearch requires an NVIDIA GPU (tested on H100). This fork rem
 
 All changes are backward-compatible — if a CUDA GPU is detected, the code uses CUDA paths automatically.
 
+---
+
 ## Requirements
 
 - **CPU**: Any x86_64 processor (tested on Intel Core Ultra 7 265, 20 cores)
@@ -27,7 +60,9 @@ All changes are backward-compatible — if a CUDA GPU is detected, the code uses
 - **Python**: 3.10+
 - **No GPU needed**
 
-## Quick start
+---
+
+## Quick Start
 
 ```bash
 # 1. Install uv (if you don't have it)
@@ -43,7 +78,11 @@ uv run prepare.py --num-shards 4
 uv run train.py
 ```
 
-## Benchmark (Intel Core Ultra 7 265, 20 cores, 128GB RAM)
+---
+
+## Benchmark
+
+Intel Core Ultra 7 265, 20 cores, 128GB RAM:
 
 | Metric | Value |
 |--------|-------|
@@ -57,7 +96,9 @@ uv run train.py
 
 With the default 30 min TIME_BUDGET, expect ~140 steps and better val_bpb (~1.5-1.7).
 
-## How it works
+---
+
+## How It Works
 
 Same as the original — three files:
 
@@ -67,7 +108,9 @@ Same as the original — three files:
 
 Point your AI agent (Claude, GPT, Codex, etc.) at `program.md` and let it run experiments autonomously. Each experiment modifies `train.py`, trains for the time budget, checks `val_bpb`, and keeps or discards the change.
 
-## Tuning for your hardware
+---
+
+## Tuning for Your Hardware
 
 If training is too slow or you want faster iteration:
 
@@ -81,28 +124,48 @@ If training is too slow or you want faster iteration:
 
 For much smaller hardware, consider using [TinyStories](https://huggingface.co/datasets/karpathy/tinystories-gpt4-clean) dataset — lower entropy text produces better results with tiny models.
 
-## Key findings
+---
+
+## Key Findings
 
 **bf16 autocast on CPU is broken for training.** `torch.amp.autocast(device_type="cpu", dtype=torch.bfloat16)` causes ~400x backward pass slowdown. Forward pass is fine, but autograd backward is catastrophically slow. This fork uses fp32 with `contextlib.nullcontext()` instead.
 
 **torch.compile inductor crashes on CPU.** The inductor backend fails during C++ code generation for this model architecture. This fork skips compilation on CPU entirely. Training still works in eager mode.
 
-## Security notes
+---
+
+## Security Notes
 
 - **Tokenizer cache integrity**: The tokenizer is stored as a Python pickle at `~/.cache/autoresearch/tokenizer/tokenizer.pkl`. A SHA-256 hash is written alongside it at creation time and verified on every load. Do not import tokenizer caches from untrusted sources.
-- **Data provenance**: Dataset shards are downloaded from HuggingFace over HTTPS. No content-integrity checksums are verified beyond TLS. If you require stricter provenance guarantees, verify shard hashes manually before training.
+- **Data provenance**: Dataset shards are downloaded from HuggingFace over HTTPS. No content-integrity checksums are verified beyond TLS.
 - **Autonomous execution**: The `program.md` workflow instructs AI agents to run indefinitely with local git operations. Always run on a dedicated branch in an isolated environment.
+
+---
+
+## Contributing
+
+Contributions are welcome! Please open an issue first to discuss what you'd like to change.
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feat/my-feature`)
+3. Test with `uv run train.py` to verify
+4. Commit your changes
+5. Push to the branch and open a Pull Request
+
+---
 
 ## License
 
-MIT — same as the original.
+[Apache-2.0](./LICENSE) — same as the original.
+
+---
 
 ## Credits
 
 - [Karpathy's autoresearch](https://github.com/karpathy/autoresearch) — the original project
 - [nanochat](https://github.com/karpathy/nanochat) — the training code this is based on
 
-## Other platform forks
+## Other Platform Forks
 
 - [miolini/autoresearch-macos](https://github.com/miolini/autoresearch-macos) (MacOS)
 - [trevin-creator/autoresearch-mlx](https://github.com/trevin-creator/autoresearch-mlx) (MacOS MLX)
