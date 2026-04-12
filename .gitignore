@@ -24,3 +24,10 @@ results.tsv
 
 # Training logs
 run.log
+
+# Secrets and credentials
+.env
+.env.*
+*.key
+*.pem
+*.secret

@@ -116,5 +116,7 @@ As an example use case, a user might leave you running while they sleep. If each
 ## Safety notes
 
 - **Run on a dedicated branch.** The experiment loop performs `git reset` when discarding failed experiments. Never run this on a branch with uncommitted work you care about.
-- **Use an isolated environment.** Prefer running in a dedicated directory or container to avoid accidental impact on other projects or system state.
-- **Monitor resource usage.** The autonomous loop runs indefinitely and consumes CPU/memory continuously. On shared machines, be mindful of other users and workloads.
+- **Use an isolated environment.** Run inside a container (Docker), VM, or sandboxed environment. The agent modifies and executes arbitrary Python code — never run on a host with access to sensitive data or production systems.
+- **Set resource limits.** Use `ulimit`, cgroups, or container memory/CPU limits to prevent runaway resource consumption. The autonomous loop runs indefinitely and consumes CPU/memory continuously.
+- **Monitor resource usage.** On shared machines, be mindful of other users and workloads. Consider setting a maximum experiment count or wall-clock timeout as an outer safety bound.
+- **Network isolation.** The training script does not require network access after `prepare.py` has downloaded the data. Consider disabling network access during the autonomous loop to prevent unintended external connections.

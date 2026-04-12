@@ -11,6 +11,7 @@ Data and tokenizer are stored in ~/.cache/autoresearch/.
 
 import os
 import sys
+import stat
 import time
 import math
 import hashlib
@@ -62,6 +63,10 @@ BOS_TOKEN = "<|reserved_0|>"
 # Data download
 # ---------------------------------------------------------------------------
 
+MAX_SHARD_SIZE = 200 * 1024 * 1024  # 200 MB — reject abnormally large shards
+MIN_SHARD_SIZE = 1024               # 1 KB  — reject empty/corrupt downloads
+
+
 def download_single_shard(index):
     """Download one parquet shard with retries. Returns True on success."""
     filename = f"shard_{index:05d}.parquet"
@@ -76,12 +81,18 @@ def download_single_shard(index):
             response = requests.get(url, stream=True, timeout=30)
             response.raise_for_status()
             temp_path = filepath + ".tmp"
+            downloaded = 0
             with open(temp_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
                     if chunk:
+                        downloaded += len(chunk)
+                        if downloaded > MAX_SHARD_SIZE:
+                            raise IOError(f"Shard exceeds {MAX_SHARD_SIZE} bytes, aborting")
                         f.write(chunk)
+            if downloaded < MIN_SHARD_SIZE:
+                raise IOError(f"Shard too small ({downloaded} bytes), likely corrupt")
             os.rename(temp_path, filepath)
-            print(f"  Downloaded {filename}")
+            print(f"  Downloaded {filename} ({downloaded / 1024 / 1024:.1f} MB)")
             return True
         except (requests.RequestException, IOError) as e:
             print(f"  Attempt {attempt}/{max_attempts} failed for {filename}: {e}")
@@ -96,9 +107,15 @@ def download_single_shard(index):
     return False
 
 
+def _secure_makedirs(path):
+    """Create directory with owner-only permissions (rwx------)."""
+    os.makedirs(path, exist_ok=True)
+    os.chmod(path, stat.S_IRWXU)
+
+
 def download_data(num_shards, download_workers=8):
     """Download training shards + pinned validation shard."""
-    os.makedirs(DATA_DIR, exist_ok=True)
+    _secure_makedirs(DATA_DIR)
     num_train = min(num_shards, MAX_SHARD)
     ids = list(range(num_train))
     if VAL_SHARD not in ids:
@@ -162,7 +179,7 @@ def train_tokenizer():
         print(f"Tokenizer: already trained at {TOKENIZER_DIR}")
         return
 
-    os.makedirs(TOKENIZER_DIR, exist_ok=True)
+    _secure_makedirs(TOKENIZER_DIR)
 
     parquet_files = list_parquet_files()
     if len(parquet_files) < 2:
@@ -251,12 +268,10 @@ class Tokenizer:
                     "Delete the cache and re-run prepare.py."
                 )
         else:
-            import warnings
-            warnings.warn(
+            raise RuntimeError(
                 f"No integrity hash found at {hash_path}. "
-                "Tokenizer loaded without verification. "
-                "Re-run prepare.py to generate the hash file.",
-                stacklevel=2,
+                "Refusing to load unverified tokenizer pickle (arbitrary code execution risk). "
+                "Re-run prepare.py to generate the hash file."
             )
         enc = pickle.loads(data)
         return cls(enc)
@@ -420,10 +435,13 @@ def evaluate_bpb(model, tokenizer, batch_size):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Prepare data and tokenizer for autoresearch")
     parser.add_argument("--num-shards", type=int, default=10, help="Number of training shards to download (-1 = all). Val shard is always pinned.")
-    parser.add_argument("--download-workers", type=int, default=8, help="Number of parallel download workers")
+    parser.add_argument("--download-workers", type=int, default=8, help="Number of parallel download workers (1-32)")
     args = parser.parse_args()
 
     num_shards = MAX_SHARD if args.num_shards == -1 else args.num_shards
+    if num_shards < -1 or num_shards == 0:
+        parser.error("--num-shards must be -1 (all) or a positive integer")
+    args.download_workers = max(1, min(args.download_workers, 32))
 
     print(f"Cache directory: {CACHE_DIR}")
     print()
