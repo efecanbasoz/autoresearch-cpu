@@ -3,7 +3,7 @@ name = "autoresearch-cpu"
 version = "0.1.0"
 description = "CPU adaptation of Karpathy's autoresearch — autonomous ML research on commodity hardware, no GPU required"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "matplotlib>=3.10.8,<4",
     "numpy>=2.2.6,<3",
@@ -12,7 +12,7 @@ dependencies = [
     "requests>=2.32.0,<3",
     "rustbpe>=0.1.0,<1",
     "tiktoken>=0.11.0,<1",
-    "torch>=2.9.0,<3",
+    "torch>=2.6.0,<3",
 ]
 
 [tool.uv.sources]

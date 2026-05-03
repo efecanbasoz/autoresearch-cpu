@@ -65,20 +65,45 @@ BOS_TOKEN = "<|reserved_0|>"
 
 MAX_SHARD_SIZE = 200 * 1024 * 1024  # 200 MB — reject abnormally large shards
 MIN_SHARD_SIZE = 1024               # 1 KB  — reject empty/corrupt downloads
+CONNECT_TIMEOUT = 15                # seconds for TCP connection
+READ_TIMEOUT = 60                   # seconds for first byte to arrive
+MAX_RETRY_BACKOFF = 120             # maximum wait between retries in seconds
+MAX_RETRIES = 5                     # number of download attempts per shard
+
+
+def _get_session():
+    """Create a requests Session with connection pooling for reuse."""
+    session = requests.Session()
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=8,
+        pool_maxsize=8,
+        max_retries=0,  # we handle retries ourselves
+    )
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+# Module-level session shared across download workers (one per process)
+_session = None
+
+def _init_worker():
+    global _session
+    _session = _get_session()
 
 
 def download_single_shard(index):
     """Download one parquet shard with retries. Returns True on success."""
+    global _session
     filename = f"shard_{index:05d}.parquet"
     filepath = os.path.join(DATA_DIR, filename)
     if os.path.exists(filepath):
         return True
 
     url = f"{BASE_URL}/{filename}"
-    max_attempts = 5
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = requests.get(url, stream=True, timeout=30)
+            response = _session.get(url, stream=True, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
             response.raise_for_status()
             temp_path = filepath + ".tmp"
             downloaded = 0
@@ -95,15 +120,16 @@ def download_single_shard(index):
             print(f"  Downloaded {filename} ({downloaded / 1024 / 1024:.1f} MB)")
             return True
         except (requests.RequestException, IOError) as e:
-            print(f"  Attempt {attempt}/{max_attempts} failed for {filename}: {e}")
+            print(f"  Attempt {attempt}/{MAX_RETRIES} failed for {filename}: {e}")
             for path in [filepath + ".tmp", filepath]:
                 if os.path.exists(path):
                     try:
                         os.remove(path)
                     except OSError:
                         pass
-            if attempt < max_attempts:
-                time.sleep(2 ** attempt)
+            if attempt < MAX_RETRIES:
+                wait = min(2 ** attempt, MAX_RETRY_BACKOFF)
+                time.sleep(wait)
     return False
 
 
@@ -131,7 +157,7 @@ def download_data(num_shards, download_workers=8):
     print(f"Data: downloading {needed} shards ({existing} already exist)...")
 
     workers = max(1, min(download_workers, needed))
-    with Pool(processes=workers) as pool:
+    with Pool(processes=workers, initializer=_init_worker, maxtasksperchild=128) as pool:
         results = pool.map(download_single_shard, ids)
 
     ok = sum(1 for r in results if r)

@@ -5,7 +5,11 @@ Usage: uv run train.py
 """
 
 import os
-import resource
+try:
+    import resource
+    HAS_RESOURCE = True
+except ImportError:
+    HAS_RESOURCE = False
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 # CPU optimization: use all available cores
 num_cores = os.cpu_count() or 1
@@ -641,7 +645,10 @@ if device.type == "cuda":
     peak_vram_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
 else:
     steady_state_mfu = 0.0
-    peak_vram_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # KB -> MB
+    if HAS_RESOURCE:
+        peak_vram_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # KB -> MB
+    else:
+        peak_vram_mb = 0
 
 print("---")
 print(f"val_bpb:          {val_bpb:.6f}")
